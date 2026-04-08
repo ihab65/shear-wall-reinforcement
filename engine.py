@@ -152,8 +152,11 @@ class ConfinedArea:
         each face (between the two corner bars).  Matches ETABS "Along 3".
     along_dia : int
         Diameter of the intermediate (along-2 and along-3) bars [mm].
-    cover : float
-        Clear cover to the hoop/tie [mm].  Defaults to the wall cover.
+    hoop_dia : int
+        Diameter of the confinement hoop / tie [mm].  Default 8 mm.
+        Used to compute exact bar centreline offsets from the rectangle edge:
+            offset_corner = cover + hoop_dia + corner_dia / 2
+            offset_along  = cover + hoop_dia + along_dia  / 2
 
     Notes
     -----
@@ -169,58 +172,86 @@ class ConfinedArea:
     along_2:    int     # additional bars along w-face (each side)
     along_3:    int     # additional bars along h-face (each side)
     along_dia:  int     # mm
+    hoop_dia:   int = 8 # mm — confinement tie diameter
 
     def total_bars(self) -> int:
-        return 4 + 2 * self.along_2 * 2 + 2 * self.along_3 * 2
+        """Total longitudinal bars in one confined zone.
+
+        4 corners + 2·along_2 (bottom and top w-faces)
+                  + 2·along_3 (left and right h-faces)
+        """
+        return 4 + 2 * self.along_2 + 2 * self.along_3
 
     def As_total_mm2(self) -> float:
         """Total steel area in one confined zone [mm²]."""
-        A_corner   = 4 * np.pi * self.corner_dia**2 / 4
-        A_along_2  = 2 * 2 * self.along_2 * np.pi * self.along_dia**2 / 4
-        A_along_3  = 2 * 2 * self.along_3 * np.pi * self.along_dia**2 / 4
+        A_corner  = 4          * np.pi * self.corner_dia**2 / 4
+        A_along_2 = 2 * self.along_2 * np.pi * self.along_dia**2 / 4
+        A_along_3 = 2 * self.along_3 * np.pi * self.along_dia**2 / 4
         return A_corner + A_along_2 + A_along_3
 
     # ── geometry helpers ────────────────────────────────────────────────────
 
-    def bar_positions_local(self) -> list[tuple[float, float, float]]:
+    def bar_positions_local(self, cover: float) -> list[tuple[float, float, float]]:
         """Return (x, y, area) of every bar in local coords.
 
         Local origin = bottom-left of the ConfinedArea rectangle.
-        Coordinates are measured to bar centrelines (i.e. after deducting
-        cover to the tie and half the bar diameter).
+        Coordinates are exact bar centrelines computed as:
+            offset_corner = cover + hoop_dia + corner_dia / 2
+            offset_along  = cover + hoop_dia + along_dia  / 2
+
+        The intermediate bars on the w-faces share the same y-offset as the
+        corner bars (they sit on the same tie leg), and vice-versa for the
+        h-faces.  The spacing between consecutive bars is measured between
+        centrelines inside the hoop perimeter.
+
+        Parameters
+        ----------
+        cover : float
+            Clear cover to the **outside face** of the confinement hoop [mm].
+            Pass ``WallGeometry.cover`` from the call site.
         """
-        c_to_bar = 8.0   # approximate: cover_to_hoop + hoop_dia + r_bar
-        # For a proper placement use cover + hoop + r_bar, but the caller
-        # (engine) has the full cover value and adjusts.
+        # Exact offset from rectangle edge to bar centreline
+        off_c = cover + self.hoop_dia + self.corner_dia / 2.0   # corner bars
+        off_a = cover + self.hoop_dia + self.along_dia  / 2.0   # intermediate bars
+
+        # Inner span between corner bar centrelines (used for intermediate spacing)
+        # Along-2 direction (w): corners sit at off_c from each w-edge
+        inner_w = self.w - off_c - off_c   # distance between the two corner centrelines
+        # Along-3 direction (h): corners sit at off_c from each h-edge
+        inner_h = self.h - off_c - off_c
+
         positions = []
         A_c = np.pi * self.corner_dia**2 / 4
         A_a = np.pi * self.along_dia**2 / 4
 
-        # Corner bars (4)
-        corners = [(c_to_bar, c_to_bar),
-                   (self.w - c_to_bar, c_to_bar),
-                   (c_to_bar, self.h - c_to_bar),
-                   (self.w - c_to_bar, self.h - c_to_bar)]
+        # ── Corner bars (4) ─────────────────────────────────────────────────
+        corners = [
+            (off_c,          off_c),
+            (self.w - off_c, off_c),
+            (off_c,          self.h - off_c),
+            (self.w - off_c, self.h - off_c),
+        ]
         for cx, cy in corners:
             positions.append((cx, cy, A_c))
 
-        # Along-2: intermediate bars on top and bottom edges
+        # ── Along-2: intermediate bars on bottom and top w-faces ─────────────
+        # These bars share the y-offset of the corner bars (same tie leg).
+        # Their x positions are evenly spaced between the two corner centrelines.
         if self.along_2 > 0:
-            span_2 = self.w - 2 * c_to_bar
-            sp2    = span_2 / (self.along_2 + 1)
+            sp2 = inner_w / (self.along_2 + 1)
             for i in range(1, self.along_2 + 1):
-                x = c_to_bar + i * sp2
-                positions.append((x, c_to_bar,          A_a))   # bottom
-                positions.append((x, self.h - c_to_bar, A_a))   # top
+                x = off_c + i * sp2
+                positions.append((x, off_a,          A_a))   # bottom face
+                positions.append((x, self.h - off_a, A_a))   # top face
 
-        # Along-3: intermediate bars on left and right edges
+        # ── Along-3: intermediate bars on left and right h-faces ─────────────
+        # These bars share the x-offset of the corner bars (same tie leg).
         if self.along_3 > 0:
-            span_3 = self.h - 2 * c_to_bar
-            sp3    = span_3 / (self.along_3 + 1)
+            sp3 = inner_h / (self.along_3 + 1)
             for j in range(1, self.along_3 + 1):
-                y = c_to_bar + j * sp3
-                positions.append((c_to_bar,          y, A_a))   # left
-                positions.append((self.w - c_to_bar, y, A_a))   # right
+                y = off_c + j * sp3
+                positions.append((off_a,          y, A_a))   # left face
+                positions.append((self.w - off_a, y, A_a))   # right face
 
         return positions
 
@@ -228,7 +259,8 @@ class ConfinedArea:
         return (f"ConfinedArea(w={self.w}, h={self.h}, "
                 f"corner=Ø{self.corner_dia}, "
                 f"along2={self.along_2}×Ø{self.along_dia}, "
-                f"along3={self.along_3}×Ø{self.along_dia})")
+                f"along3={self.along_3}×Ø{self.along_dia}, "
+                f"hoop=Ø{self.hoop_dia})")
 
 
 @dataclass
@@ -433,8 +465,7 @@ def _place_confined_bars(
 
     Returns the updated geometry.
     """
-    # Derive the actual clear cover to bar centre from cover + hoop (8mm) + r_bar
-    local_bars = ca.bar_positions_local()
+    local_bars = ca.bar_positions_local(cover)
 
     # lc_mm is the full BE zone length; centre the confined rectangle in it
     # Left BE: rectangle left edge at max(0, lc_mm/2 − ca.w/2)
@@ -669,36 +700,34 @@ def run_ductility(
 
     # ── α  (eq. 7.35) — requires ConfinedArea ───────────────────────────────
     if cfg_base.confined is None:
-        # Approximate with full confinement (α = 1) if no ConfinedArea given
+        # Approximate with full confinement (alpha = 1) if no ConfinedArea given
         alpha_n, alpha_s, alpha = 1.0, 1.0, 1.0
-        b0  = bw_mm - 2 * c
-        h0  = bw_mm - 2 * c   # square section assumed
+        _hoop = 8.0
+        b0  = bw_mm - 2 * (c + _hoop / 2.0)
+        h0  = b0
         bc  = bw_mm
         t   = min(b0 / 3, 125.0, 6 * cfg_base.effective_boundary_dia())
     else:
         ca  = cfg_base.confined
-        b0  = ca.w - 2 * c    # confined core width
-        h0  = ca.h - 2 * c    # confined core height
+        # Confined core = distance between hoop centrelines (eq. 7.35)
+        _hoop_cl = c + ca.hoop_dia / 2.0
+        b0  = ca.w - 2 * _hoop_cl
+        h0  = ca.h - 2 * _hoop_cl
         bc  = ca.w
-        t   = min(b0 / 3, 125.0, 6 * cfg_base.confined.corner_dia)
+        t   = min(b0 / 3, 125.0, 6 * ca.corner_dia)
 
-        # Number of restrained longitudinal bars n (all bars on perimeter)
-        n_restrained = 4 + 2 * ca.along_2 + 2 * ca.along_3  # perimeter bars
-
-        # Sum of (bi)² / (6 b0 h0)
-        # bi = spacing between consecutive restrained bars along perimeter
-        # We approximate with uniform spacing for along_2 / along_3
-        bars_along_b = ca.along_2 + 2   # total bars along b-edge incl. corners
-        bars_along_h = ca.along_3 + 2   # total bars along h-edge incl. corners
+        # alpha_n: bar spacing factor
+        bars_along_b = ca.along_2 + 2
+        bars_along_h = ca.along_3 + 2
         sp_b = b0 / (bars_along_b - 1) if bars_along_b > 1 else b0
         sp_h = h0 / (bars_along_h - 1) if bars_along_h > 1 else h0
 
-        sum_bi2 = (2 * ca.along_2 * sp_b**2 + 2 * ca.along_3 * sp_h**2
-                   + 4 * min(sp_b, sp_h)**2)   # approx corner contribution
-        alpha_n = 1.0 - sum_bi2 / (6 * b0 * h0)
-        alpha_n = max(0.0, alpha_n)
+        sum_bi2 = (2 * (bars_along_b - 1) * sp_b**2
+                   + 2 * (bars_along_h - 1) * sp_h**2)
+        alpha_n = max(0.0, 1.0 - sum_bi2 / (6.0 * b0 * h0))
 
-        alpha_s = (1.0 - t / (2 * b0)) * (1.0 - t / (2 * h0))
+        # alpha_s: stirrup spacing factor
+        alpha_s = (1.0 - t / (2.0 * b0)) * (1.0 - t / (2.0 * h0))
         alpha   = alpha_n * alpha_s
 
     # ── ε_sy,d ──────────────────────────────────────────────────────────────
@@ -713,12 +742,11 @@ def run_ductility(
     # ── α·ω_wd provided ─────────────────────────────────────────────────────
     if cfg_base.confined is not None:
         ca   = cfg_base.confined
-        # Volume of hoops in the confined core (rectangular hoops)
-        # Assume single hoop layer per stirrup set, diameter = corner_dia for main hoop
-        hoop_dia      = 10   # typical hoop diameter [mm] — could be a parameter
-        A_hoop        = np.pi * hoop_dia**2 / 4
-        V_hoops_per_s = 2 * (b0 + h0) * A_hoop   # perimeter × area per unit length
-        V_core_per_s  = b0 * h0 * t               # core volume per stirrup pitch t
+        # Use ca.hoop_dia — the actual confinement tie diameter from ConfinedArea
+        A_hoop        = np.pi * ca.hoop_dia**2 / 4
+        # Two legs per direction: total perimeter = 2*(b0 + h0)
+        V_hoops_per_s = 2 * (b0 + h0) * A_hoop   # [mm³] per unit stirrup pitch
+        V_core_per_s  = b0 * h0 * t               # [mm³] per stirrup pitch
         omega_wd_prov = alpha * (V_hoops_per_s / V_core_per_s) * (mat.fyd / mat.fcd)
     else:
         omega_wd_prov = omega_wd_req   # conservative: assume exactly met
@@ -997,7 +1025,7 @@ def _bar_positions_from_config(cfg: RebarConfig, lw_mm, bw_mm, lc_mm, cover):
     be_bars = []
     if cfg.confined is not None:
         ca            = cfg.confined
-        local_bars    = ca.bar_positions_local()
+        local_bars    = ca.bar_positions_local(cover)
         x_left_origin  = lc_mm / 2.0 - ca.w / 2.0
         x_right_origin = lw_mm - lc_mm / 2.0 - ca.w / 2.0
         y_origin       = bw_mm / 2.0 - ca.h / 2.0
