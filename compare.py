@@ -38,7 +38,7 @@ cfg = RebarConfig(
     name='C1 — Critique', confined=be_critique, web_dia=12, web_spacing=150
 )
 
-N_Ed = 12016.0  # kN (Compression)
+N_Ed = 6120 * 2 # kN (Compression)
 M_Ed = 820.0   # kN.m
 
 # =============================================================================

@@ -68,6 +68,7 @@ class WallGeometry:
     hw: float          # total height [m]
     he: float          # storey clear height [m]
     cover: float = 30.0  # clear cover [mm]
+    lc_override: Optional[float] = None  # user-specified lc [m]; must be ≥ lc_min
 
     @property
     def n_storeys(self) -> int:
@@ -78,9 +79,20 @@ class WallGeometry:
         return max(self.lw, self.hw / 6)
 
     @property
-    def lc(self) -> float:
-        """Minimum boundary element length per RPA 2024 §7.7.3 [m]."""
+    def lc_min(self) -> float:
+        """Code-minimum boundary element length per RPA 2024 §7.7.3 [m]."""
         return max(0.15 * self.lw, 1.5 * self.bw)
+
+    @property
+    def lc(self) -> float:
+        """Boundary element length [m].
+
+        Returns ``lc_override`` when set (clamped to at least ``lc_min``),
+        otherwise falls back to ``lc_min``.
+        """
+        if self.lc_override is not None:
+            return max(self.lc_override, self.lc_min)
+        return self.lc_min
 
     @property
     def n_crit(self) -> int:
@@ -469,9 +481,9 @@ def _place_confined_bars(
 
     # lc_mm is the full BE zone length; centre the confined rectangle in it
     # Left BE: rectangle left edge at max(0, lc_mm/2 − ca.w/2)
-    x_left_origin  = lc_mm / 2.0 - ca.w / 2.0
+    x_left_origin  = ca.w / 2.0
     # Right BE: rectangle left edge at lw_mm − lc_mm/2 − ca.w/2
-    x_right_origin = lw_mm - lc_mm / 2.0 - ca.w / 2.0
+    x_right_origin = lc_mm / 2.0 - ca.w / 2.0
     y_origin       = bw_mm / 2.0 - ca.h / 2.0
 
     for x_origin in [x_left_origin, x_right_origin]:
@@ -582,7 +594,7 @@ def compute_nm_curves(
     results = {}
     for cfg in configs:
         sec = build_wall_section(geom, cfg, concrete_mat, steel_mat)
-        mi  = sec.moment_interaction_diagram(theta=0, n_points=n_points,
+        mi  = sec.moment_interaction_diagram(theta=np.pi/2, n_points=n_points,
                                               progress_bar=False)
         results[cfg.name] = {"mi": mi, "cfg": cfg}
     return results
@@ -592,7 +604,7 @@ def get_mr_for_ned(mi_result, N_ed_kN: float) -> float:
     mi     = mi_result["mi"]
     N_cp   = -N_ed_kN * 1e3
     n_arr  = np.array([r.n   for r in mi.results])
-    mx_arr = np.array([r.m_x for r in mi.results])
+    mx_arr = np.array([r.m_y for r in mi.results])
     order  = np.argsort(n_arr)
     n_s, mx_s = n_arr[order], mx_arr[order]
     N_cp   = float(np.clip(N_cp, n_s[0], n_s[-1]))
@@ -957,8 +969,8 @@ def make_nm_figure(
     for (name, data), color in zip(nm_curves.items(), PALETTE):
         mi     = data["mi"]
         n_kn   = np.array([r.n   for r in mi.results]) / 1e3
-        mx_knm = np.array([r.m_x for r in mi.results]) / 1e6
-        ax1.plot(mx_knm, n_kn, label=name, color=color, lw=2.2)
+        my_knm = -1.0 * np.array([r.m_y for r in mi.results]) / 1e6
+        ax1.plot(my_knm, n_kn, label=name, color=color, lw=2.2)
 
     for i, c in enumerate(combos):
         N_plot = -c.N_ed
@@ -968,6 +980,7 @@ def make_nm_figure(
 
     ax1.axhline(0, color="#999", lw=0.8, ls="--")
     ax1.set_xlabel("Moment [kN·m]", fontsize=10)
+    ax1.set_xlim(left=0)
     ax1.set_ylabel("Effort normal N [kN]  —  compression (+)  /  traction (−)", fontsize=9)
     ax1.set_title("Diagramme N-M  (convention : compression positive)",
                   fontsize=11, fontweight="bold")
@@ -995,6 +1008,7 @@ def make_nm_figure(
         )
 
     ax2.set_xlabel("Moment [kN·m]",  fontsize=10)
+    ax2.set_xlim(left=0)
     ax2.set_ylabel("Hauteur z [m]",  fontsize=10)
     ax2.set_title("Enveloppe vs Moment résistant\n(RPA 2024 §7.7.4)",
                   fontsize=11, fontweight="bold")
